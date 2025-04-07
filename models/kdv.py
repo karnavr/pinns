@@ -38,8 +38,9 @@ class KDV(nn.Module):
         self.x_lims = (-50, 50)
         self.t_lims = (0, 10)
         
-        # setup domain points
-        self.setup_domain()
+        # setup training domain points
+        self.setup_training_domain()
+        self.test_domain_created = False
         
         # setup figure size 
         self.figsize = (10, 6)
@@ -65,7 +66,7 @@ class KDV(nn.Module):
         # The correct formula from Nadia's thesis: u = 2k² sech(kx + φ)²
         return 2 * (k**2) * torch.pow(1.0 / torch.cosh(k * x + phi), 2)
 
-    def setup_domain(self, n_collocation=30000, n_initial=30000, n_boundary=30000):
+    def setup_training_domain(self, n_collocation=30000, n_initial=30000, n_boundary=30000):
         """
         Setup the domain points for training the PINN to solve the KdV equation.
         """
@@ -131,23 +132,28 @@ class KDV(nn.Module):
         self.t_boundary = t_boundary.to(self.device)
         self.u_boundary = u_boundary.to(self.device)
         
-        print(f"\nDomain setup complete with {n_collocation} collocation points, {n_initial} initial points, and {n_boundary} boundary points.")
+        print(f"""
+Training domain setup complete: 
+- {n_collocation} collocation points
+- {n_initial} initial points
+- {n_boundary} boundary points""")
         print(f"Using {self.num_solitons}-soliton initial condition.")
         
-    def create_evaluation_grid(self, nx=1000, nt=1000):
-
+    def setup_testing_domain(self, nx=1000, nt=1000):
         """
-        Create a fine grid to test the PINN.
+        Create a regular grid for testing and visualization.
+        
+        This function sets up a uniform meshgrid covering the entire domain
+        for evaluation and visualization of the PINN solution. The grid
+        is stored as instance variables for later use.
         """
-
-        # This function can remain the same as in Burgers
         # unpack domain limits 
         x0 = self.x_lims[0]
         x1 = self.x_lims[1]
-
+        
         t0 = self.t_lims[0]
         t1 = self.t_lims[1]
-
+        
         # define points in each dimension 
         x = torch.linspace(x0, x1, nx).to(self.device)
         t = torch.linspace(t0, t1, nt).to(self.device)
@@ -158,10 +164,19 @@ class KDV(nn.Module):
         # reshape for network input
         X_flat = X.reshape(-1, 1)
         T_flat = T.reshape(-1, 1)
-
-        ## flat versions are for network input and meshgrids are for plotting 
         
-        return X, T, X_flat, T_flat
+        # Store as instance variables
+        self.X_test = X
+        self.T_test = T
+        self.X_flat_test = X_flat
+        self.T_flat_test = T_flat
+        
+        # Set flag indicating test domain has been created
+        self.test_domain_created = True
+        
+        print(f"Testing domain created with {nx}x{nt} grid points.")
+    
+        return 
 
     # LOSS FUNCTIONS 
     def compute_pde_residual(self, x, t):
@@ -353,6 +368,80 @@ class KDV(nn.Module):
         else:
             raise ValueError(f"Analytical solution for {self.num_solitons} solitons not implemented")
 
+    def compute_test_solutions(self, force_recompute=False):
+        """
+        Compute the PINN prediction and analytical solution (if available) over the entire test domain.
+        
+        This function evaluates the trained neural network over the previously created test domain
+        and stores the results as instance variables. It also computes the analytical solution when 
+        available for comparison.
+        
+        Parameters:
+        -----------
+        force_recompute: bool
+            If True, recompute the solutions even if they've been computed before
+            
+        Returns:
+        --------
+        dict:
+            Dictionary containing 'predicted' and (if available) 'exact' solutions
+        
+        Raises:
+        -------
+        RuntimeError:
+            If setup_testing_domain() hasn't been called yet
+        """
+        # Check if test domain has been created
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            raise RuntimeError("Test domain not created. Call setup_testing_domain() first.")
+        
+        # Skip computation if already done (unless forced)
+        if hasattr(self, 'test_solution_computed') and self.test_solution_computed and not force_recompute:
+            print("Test solutions already computed. Use force_recompute=True to recompute.")
+            return
+        
+        print("Computing solutions over the test domain...")
+        
+        # Compute PINN predictions
+        with torch.no_grad():
+            U_pred_flat = self.net(self.X_flat_test, self.T_flat_test)
+            U_pred = U_pred_flat.reshape(self.X_test.shape)
+        
+        # Store as instance variable
+        self.U_pred = U_pred
+        
+        # Try to compute analytical solution if available
+        try:
+            print("Attempting to compute analytical solution...")
+            U_exact = self.analytical_solution(self.X_test, self.T_test)
+            self.U_exact = U_exact
+            has_exact = True
+            print("Analytical solution computed successfully.")
+        except (ValueError, NotImplementedError, AttributeError) as e:
+            print(f"Analytical solution not available: {e}")
+            has_exact = False
+        
+        # Set flag that solutions have been computed
+        self.test_solution_computed = True
+        
+        # Create numpy versions for easy plotting
+        # Since many matplotlib functions work better with numpy arrays
+        self.X_np = self.X_test.cpu().numpy()
+        self.T_np = self.T_test.cpu().numpy()
+        self.U_pred_np = self.U_pred.cpu().numpy()
+        
+        if has_exact:
+            self.U_exact_np = self.U_exact.cpu().numpy()
+        
+        print("Test solutions computation complete.")
+        
+        # Return dictionary of solutions
+        result = {'predicted': self.U_pred}
+        if has_exact:
+            result['exact'] = self.U_exact
+        
+        return result
+
     def test(self, nx=1000, nt=1000):
         """
         Evaluate the PINN performance by comparing against the analytical solution
@@ -397,234 +486,154 @@ class KDV(nn.Module):
         plt.tight_layout()
         
         return rel_l2_error.item()
-    
-    def plot_error_heatmap(self, nx=200, nt=200, cmap='viridis', log_scale=True):
-        """
-        Tests the PINN solution over the entire space-time domain and creates a heatmap
-        of the absolute error compared to the analytical solution.
-        
-        Parameters:
-        -----------
-        nx: int
-            Number of spatial points for the evaluation grid
-        nt: int
-            Number of temporal points for the evaluation grid
-        cmap: str
-            Colormap to use for the heatmap
-        log_scale: bool
-            Whether to use a logarithmic scale for the error colormap
-        
-        Returns:
-        --------
-        fig, ax: matplotlib figure and axis
-            The generated figure and axis objects
-        """
-        print(f"Evaluating error over the entire space-time domain ({nx}x{nt} points)...")
-        
-        # Create evaluation grid
-        X, T, X_flat, T_flat = self.create_evaluation_grid(nx=nx, nt=nt)
-        
-        # Compute PINN predictions
-        with torch.no_grad():
-            U_pred_flat = self.net(X_flat, T_flat)
-            U_pred = U_pred_flat.reshape(X.shape)
-        
-        try:
-            # Compute analytical solution (if available)
-            U_exact = self.analytical_solution(X, T)
-            
-            # Compute absolute error at each point
-            abs_error = torch.abs(U_pred - U_exact)
-            
-            # Convert to numpy for visualization
-            X_np = X.cpu().numpy()
-            T_np = T.cpu().numpy()
-            error_np = abs_error.cpu().numpy()
-            
-            # Calculate error statistics
-            mean_error = error_np.mean()
-            max_error = error_np.max()
-            
-            # Print error statistics
-            print(f"Mean Error: {mean_error:.6e}")
-            print(f"Max Error: {max_error:.6e}")
-            
-            # Create figure and plot heatmap
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # Determine colormap normalization
-            if log_scale:
-                # Use logarithmic scale for the error (better for visualizing varying magnitudes)
-                # Add small epsilon to avoid log(0)
-                epsilon = 1e-10
-                norm = plt.cm.colors.LogNorm(vmin=max(epsilon, error_np.min()), vmax=max(error_np.max(), epsilon*10))
-                plot_label = 'Absolute Error (log scale)'
-            else:
-                # Linear scale
-                norm = plt.cm.colors.Normalize(vmin=0, vmax=error_np.max())
-                plot_label = 'Absolute Error'
-            
-            # Plot the heatmap
-            im = ax.pcolormesh(T_np[0, :], X_np[:, 0], error_np, cmap=cmap, norm=norm, shading='auto')
-            
-            # Add colorbar
-            cbar = fig.colorbar(im, ax=ax, label=plot_label)
-            
-            # Labels
-            ax.set_xlabel('Time (t)')
-            ax.set_ylabel('Position (x)')
-            
-            plt.tight_layout()
-            
-            return fig, ax
-            
-        except (ValueError, NotImplementedError) as e:
-            print(f"Could not compute error: {e}")
-            print("Make sure analytical_solution() is implemented for this number of solitons.")
-            return None, None
-        
-    
 
-    
     ## PLOTTING 
     def compute_profile(self, t_val):
         """
-        Compute the solution profile at specific time point(s).
+        Extract a solution profile at a specific time point from the computed test solutions.
+        
+        Parameters:
+        -----------
+        t_val: float
+            Time value at which to extract the profile
+            
+        Returns:
+        --------
+        tuple: (x_profile, u_profile)
+            Arrays containing the x-coordinates and solution values at the specified time
         """
-        # This can remain the same as Burgers
-        # create evaluation grid
-        X, T, X_flat, T_flat = self.create_evaluation_grid()
+        # Ensure test domain exists
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            print("Test domain not created. Creating default testing domain...")
+            self.setup_testing_domain()
         
-        # predict PINN solution on the grid
-        with torch.no_grad():
-            U_pred_flat = self.net(X_flat, T_flat)
-            U_pred = U_pred_flat.reshape(X.shape)
+        # Ensure solutions are computed
+        if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
+            print("Test solutions not computed. Computing solutions...")
+            self.compute_test_solutions()
         
-        # convert to numpy for plotting
-        X_np = X.cpu().numpy()
-        T_np = T.cpu().numpy()
-        U_pred_np = U_pred.cpu().numpy()
+        # Find closest time index
+        t_idx = np.argmin(np.abs(self.T_np[0, :] - t_val))
         
-        # find closest time index
-        t_idx = np.argmin(np.abs(T_np[0, :] - t_val))
-        
-        # extract the profile at the given time
-        x_profile = X_np[:, t_idx]
-        u_profile = U_pred_np[:, t_idx]
+        # Extract the profile at the given time
+        x_profile = self.X_np[:, t_idx]
+        u_profile = self.U_pred_np[:, t_idx]
         
         return x_profile, u_profile
-    
-    def plot_profiles(self, t_points=[0.0, 0.2, 0.4, 0.6, 0.8]):
+
+    def plot_profiles(self, t_points=[0.0, 2.0, 4.0, 6.0, 8.0]):
         """
         Plot solution profiles at multiple time points on the same plot.
         """
-        # This can remain the same as Burgers
-        # create a single figure
+        # Ensure test domain exists and solutions are computed
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            print("Test domain not created. Creating default testing domain...")
+            self.setup_testing_domain()
+        
+        if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
+            print("Test solutions not computed. Computing solutions...")
+            self.compute_test_solutions()
+        
+        # Create figure
         plt.figure(figsize=self.figsize)
         
-        # plot PINN predictions for each time sample
+        # Plot PINN predictions for each time sample
         for t_val in t_points:
-            # compute the profile at this time
+            # Compute the profile at this time
             x_profile, u_profile = self.compute_profile(t_val)
             
-            # plot solution with different colors for each time step
+            # Plot solution with different colors for each time step
             plt.plot(x_profile, u_profile, label=f't = {t_val}')
+        
+        # If exact solution is available, plot for the last time point
+        if hasattr(self, 'U_exact_np'):
+            t_idx = np.argmin(np.abs(self.T_np[0, :] - t_points[-1]))
+            plt.plot(self.X_np[:, t_idx], self.U_exact_np[:, t_idx], 'k--', 
+                    label=f'Exact (t = {t_points[-1]})')
         
         plt.xlabel('x')
         plt.ylabel('u(x,t)')
         plt.legend()
+        plt.title('Solution Profiles at Different Times')
         plt.tight_layout()
         
         return
-    
+
     def plot_losses(self, losses, component=None):
         """
         Plot the losses over epochs to visualize training progress.
         
         Parameters:
         -----------
-        losses: dict or list
-            Either a dictionary with loss components or a list of total loss values
+        losses: dict
+            Dictionary with loss components
         component: str, list, or None
             If None, plots total loss (default behavior)
             If 'all', plots all loss components
-            If a string, plots that specific component ('total', 'initial', 'boundary', 'pde')
             If a list of strings, plots all specified components
         """
         plt.figure(figsize=self.figsize)
         
-        # Handle different input types for backward compatibility
-        if isinstance(losses, list):
-            # Old format - just a list of total losses
-            plt.plot(losses, label='Total Loss')
-        else:
-            # New format - dictionary of loss components
-            if component is None:
-                # Default: plot just the total loss
-                plt.plot(losses['total'], label='Total Loss')
-            elif component == 'all':
-                # Plot all components
-                for key in losses:
-                    plt.plot(losses[key], label=f'{key.capitalize()} Loss')
-            elif isinstance(component, list):
-                # Plot specified components
-                for comp in component:
-                    if comp in losses:
-                        plt.plot(losses[comp], label=f'{comp.capitalize()} Loss')
-                    else:
-                        print(f"Warning: Unknown loss component '{comp}', skipping.")
-            elif component in losses:
-                # Plot single specified component
-                plt.plot(losses[component], label=f'{component.capitalize()} Loss')
+        # Convert single component to list for uniform processing
+        if component is None:
+            component = ['total']
+        elif component == 'all':
+            component = list(losses.keys())
+        elif isinstance(component, str):
+            component = [component]
+        
+        # Plot each requested component
+        for comp in component:
+            if comp in losses:
+                plt.plot(losses[comp], label=f'{comp} loss')
             else:
-                raise ValueError(f"Unknown loss component: {component}. Valid options are 'total', 'initial', 'boundary', 'pde', or 'all'")
+                raise ValueError(f"Unknown loss component '{comp}'")
         
         plt.yscale('log')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
+            
         plt.tight_layout()
         return
-    
-    def plot_spacetime(self, show_data = True):
 
+    def plot_spacetime(self, show_data=False):
         """
         Plot the solution as a color map over space and time.
+        
+        Parameters:
+        -----------
+        show_data: bool
+            Whether to show the training data points (collocation, initial, boundary)
         """
+        # Ensure test domain exists and solutions are computed
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            self.setup_testing_domain()
+        
+        if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
+            self.compute_test_solutions()
 
-        # This can remain the same as Burgers
-        # create evaluation grid
-        X, T, X_flat, T_flat = self.create_evaluation_grid(nx=1000, nt=1000)
+        plt.figure(figsize=(10, 6))
         
-        # predict PINN solution on the grid
-        with torch.no_grad():
-            U_pred_flat = self.net(X_flat, T_flat)
-            U_pred = U_pred_flat.reshape(X.shape)
-        
-        # convert to numpy for plotting
-        X_np = X.cpu().numpy()
-        T_np = T.cpu().numpy()
-        U_pred_np = U_pred.cpu().numpy()
-        
-        # convert collocation points to numpy
-        x_coll_np = self.x_collocation.cpu().numpy()
-        t_coll_np = self.t_collocation.cpu().numpy()
-
-        plt.figure(figsize=(10, 3))
-        
-        # plot the solution as a color map
-        contour = plt.pcolormesh(T_np[0, :], X_np[:, 0], U_pred_np, cmap='plasma', shading='auto')
+        # Plot the solution as a color map
+        contour = plt.pcolormesh(self.T_np[0, :], self.X_np[:, 0], self.U_pred_np, 
+                                cmap='plasma', shading='auto')
         plt.colorbar(contour, label='u(x,t)')
         
-        # plot the collocation points
+        # Plot the training data points if requested
         if show_data:
-            plt.scatter(t_coll_np, x_coll_np, marker='x', color='black', s=0.5, alpha=0.7, label='Collocation points')
-        
-            # plot initial and boundary points
-            plt.scatter(self.t_initial.cpu().numpy(), self.x_initial.cpu().numpy(), 
-                    marker='x', color='black', s=2, label='Initial condition')
-            plt.scatter(self.t_boundary.cpu().numpy(), self.x_boundary.cpu().numpy(), 
-                   marker='x', color='black', s=2, label='Boundary condition')
+            # Convert collocation points to numpy
+            x_coll_np = self.x_collocation.cpu().numpy()
+            t_coll_np = self.t_collocation.cpu().numpy()
+            
+            # Plot with different markers and sizes for clarity
+            plt.scatter(t_coll_np, x_coll_np, marker='.', color='black', s=0.3, alpha=0.5, 
+                    label='Collocation points')
+            plt.scatter(self.t_initial.cpu().numpy(), self.x_initial.cpu().numpy(),
+                    marker='x', color='white', s=3, label='Initial condition')
+            plt.scatter(self.t_boundary.cpu().numpy(), self.x_boundary.cpu().numpy(),
+                    marker='o', color='red', s=1, label='Boundary condition')
+            plt.legend(loc='upper right', fontsize='small')
         
         plt.xlabel('Time (t)')
         plt.ylabel('Position (x)')
@@ -635,34 +644,55 @@ class KDV(nn.Module):
     def animate_solution(self, running_time=5, fps=60, save_path=None, dpi=200):
         """
         Create an animation of the solution profiles over time.
+        
+        Parameters:
+        -----------
+        running_time: float
+            Duration of the animation in seconds
+        fps: int
+            Frames per second
+        save_path: str or None
+            If provided, save the animation to this file path
+        dpi: int
+            Resolution for saved animation
+            
+        Returns:
+        --------
+        matplotlib.animation.Animation
+            The animation object
         """
-        # This can remain the same as Burgers
-        # calculate the number of frames needed for the requested duration and fps
+        # Ensure test domain exists and solutions are computed
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            print("Test domain not created. Creating default testing domain...")
+            self.setup_testing_domain()
+        
+        if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
+            print("Test solutions not computed. Computing solutions...")
+            self.compute_test_solutions()
+        
+        # Calculate the number of frames needed for the requested duration and fps
         n_frames = int(running_time * fps)
         
-        # generate equally spaced time points over the entire time domain
+        # Generate equally spaced time points over the entire time domain
         t_start, t_end = self.t_lims
         time_points = np.linspace(t_start, t_end, n_frames)
         
-        # set up the figure and axis
+        # Set up the figure and axis
         fig, ax = plt.subplots(figsize=self.figsize, dpi=dpi)
         
-        # compute the initial profile to get x values and set plot limits
+        # Get the initial profile to set up the plot
         x_profile, u_profile = self.compute_profile(t_start)
         
-        # create the line that will be updated with increased line width for better visibility
+        # Create the line that will be updated with increased line width for better visibility
         line, = ax.plot(x_profile, u_profile, linewidth=2, color='black')
         
-        # set up the plot 
+        # Set up the plot limits
         ax.set_xlim(self.x_lims)
         
-        # Set y-limits based on soliton amplitudes
-        if self.num_solitons == 1:
-            k = 0.9
-            amplitude = 2 * (k**2)
-            ax.set_ylim(-0.1, amplitude * 1.2)  # Add 20% margin
-        elif self.num_solitons == 2:
-            raise ValueError(f"Support for {self.num_solitons} solitons not implemented yet")
+        # Set y-limits based on the solution range with 10% margin
+        y_min = np.min(self.U_pred_np) * 1.1 if np.min(self.U_pred_np) < 0 else np.min(self.U_pred_np) * 0.9
+        y_max = np.max(self.U_pred_np) * 1.1
+        ax.set_ylim(y_min, y_max)
         
         ax.set_xlabel('x', fontsize=12)
         ax.set_ylabel('u(x,t)', fontsize=12)
@@ -670,32 +700,31 @@ class KDV(nn.Module):
 
         # Text to display the current time with improved formatting
         time_text = ax.text(0.02, 0.95, f't = {t_start:.3f}', transform=ax.transAxes, 
-                           fontsize=12, bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
+                        fontsize=12, bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
         
-        # update function for animation
+        # Update function for animation
         def update(frame):
             t_val = time_points[frame]
             x_profile, u_profile = self.compute_profile(t_val)
             
-            # update the line data
+            # Update the line data
             line.set_data(x_profile, u_profile)
             
-            # update the time text
+            # Update the time text
             time_text.set_text(f't = {t_val:.3f}')
             
             return line, time_text
         
         plt.tight_layout()
         
-        # create the animation
+        # Create the animation
         anim = animation.FuncAnimation(
             fig, update, frames=n_frames, interval=1000/fps, 
             blit=True, repeat=True
         )
         
-        # save animation if path is provided
+        # Save animation if path is provided
         if save_path:
-            
             writer = animation.PillowWriter(
                 fps=fps,
                 metadata=dict(artist='PINN Simulation'),
