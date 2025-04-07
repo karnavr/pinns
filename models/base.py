@@ -49,7 +49,6 @@ class PINN(nn.Module):
                 nn.init.zeros_(layer.bias) # Zero initialization for biases
  
 
-
 ## PINN1D CLASS (for 1D problems with single input/output)
 class PINN1D(nn.Module):
     """
@@ -92,4 +91,3 @@ class PINN1D(nn.Module):
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_normal_(layer.weight)  # Xavier normal initialization
                 nn.init.zeros_(layer.bias)  # Zero initialization for biases
-

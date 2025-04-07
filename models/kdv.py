@@ -213,11 +213,10 @@ class KDV(nn.Module):
         return residual
 
     def compute_data_loss(self):
-
         """
         Compute the data loss for the KdV equation. (ICs and BCs)
+        Returns both total data loss and individual components.
         """
-        
         # forward pass for IC and BC points = u(x,t)
         u_pred_initial = self.net(self.x_initial, self.t_initial)
         u_pred_boundary = self.net(self.x_boundary, self.t_boundary)
@@ -229,15 +228,15 @@ class KDV(nn.Module):
         # total data loss
         data_loss = initial_loss + boundary_loss
         
-        return data_loss
+        return data_loss, initial_loss, boundary_loss
 
     def loss_fn(self):
         """
         Compute the total loss function: combining data and PDE losses.
+        Returns both the total loss and individual components.
         """
-        # Can remain the same as Burgers
         # compute data loss
-        data_loss = self.compute_data_loss()
+        data_loss, initial_loss, boundary_loss = self.compute_data_loss()
         
         # compute PDE residual and MSE residual loss
         residual = self.compute_pde_residual(self.x_collocation, self.t_collocation)
@@ -246,13 +245,18 @@ class KDV(nn.Module):
         # total loss 
         total_loss = data_loss + pde_loss
         
-        return total_loss
+        return total_loss, initial_loss, boundary_loss, pde_loss
     
     ## TRAINING 
     def train(self, adam_epochs=1000, lbfgs_epochs=50000, verbose=True, verbose_step=100):
         
         # initialize losses list 
-        losses = []
+        losses = {
+            'total': [],
+            'initial': [],
+            'boundary': [],
+            'pde': []
+        }
         
         # Phase 1: Adam optimization
         if verbose:
@@ -265,18 +269,21 @@ class KDV(nn.Module):
             optimizer.zero_grad()
             
             # compute loss
-            loss = self.loss_fn()
+            total_loss, initial_loss, boundary_loss, pde_loss = self.loss_fn()
             
             # backpropagation and optimization
-            loss.backward()
+            total_loss.backward()
             optimizer.step()
             
-            # store loss
-            losses.append(loss.item())
+            # store losses
+            losses['total'].append(total_loss.item())
+            losses['initial'].append(initial_loss.item())
+            losses['boundary'].append(boundary_loss.item())
+            losses['pde'].append(pde_loss.item())
             
             # print progress
             if verbose and (epoch % verbose_step == 0 or epoch == adam_epochs - 1):
-                print(f"Adam - Epoch {epoch}/{adam_epochs}, Loss: {loss.item():.6e}")
+                print(f"Adam - Epoch {epoch}/{adam_epochs}, Total Loss: {total_loss.item():.6e}")
         
         # Phase 2: L-BFGS optimization
         if verbose:
@@ -285,17 +292,20 @@ class KDV(nn.Module):
         # L-BFGS requires a closure that reevaluates the model and returns the loss
         def closure():
             optimizer.zero_grad()
-            loss = self.loss_fn()
-            loss.backward()
+            total_loss, initial_loss, boundary_loss, pde_loss = self.loss_fn()
+            total_loss.backward()
             
-            # Store current loss value directly in the main losses list
-            losses.append(loss.item())
+            # Store current loss values
+            losses['total'].append(total_loss.item())
+            losses['initial'].append(initial_loss.item())
+            losses['boundary'].append(boundary_loss.item())
+            losses['pde'].append(pde_loss.item())
             
             # Print progress if verbose
-            if verbose and len(losses) % verbose_step == 0:
-                print(f"L-BFGS - Iteration {len(losses) - adam_epochs}, Loss: {loss.item():.6e}")
+            if verbose and len(losses['total']) % verbose_step == 0:
+                print(f"L-BFGS - Iteration {len(losses['total']) - adam_epochs}, Total Loss: {total_loss.item():.6e}")
                 
-            return loss
+            return total_loss
         
         # initialize L-BFGS optimizer
         optimizer = torch.optim.LBFGS(self.net.parameters(),
@@ -311,7 +321,7 @@ class KDV(nn.Module):
         optimizer.step(closure)
         
         if verbose:
-            print(f"L-BFGS complete, Final Loss: {losses[-1]:.6e}")
+            print(f"L-BFGS complete, Final Loss: {losses['total'][-1]:.6e}")
         
         return losses
     
@@ -388,6 +398,94 @@ class KDV(nn.Module):
         
         return rel_l2_error.item()
     
+    def plot_error_heatmap(self, nx=200, nt=200, cmap='viridis', log_scale=True):
+        """
+        Tests the PINN solution over the entire space-time domain and creates a heatmap
+        of the absolute error compared to the analytical solution.
+        
+        Parameters:
+        -----------
+        nx: int
+            Number of spatial points for the evaluation grid
+        nt: int
+            Number of temporal points for the evaluation grid
+        cmap: str
+            Colormap to use for the heatmap
+        log_scale: bool
+            Whether to use a logarithmic scale for the error colormap
+        
+        Returns:
+        --------
+        fig, ax: matplotlib figure and axis
+            The generated figure and axis objects
+        """
+        print(f"Evaluating error over the entire space-time domain ({nx}x{nt} points)...")
+        
+        # Create evaluation grid
+        X, T, X_flat, T_flat = self.create_evaluation_grid(nx=nx, nt=nt)
+        
+        # Compute PINN predictions
+        with torch.no_grad():
+            U_pred_flat = self.net(X_flat, T_flat)
+            U_pred = U_pred_flat.reshape(X.shape)
+        
+        try:
+            # Compute analytical solution (if available)
+            U_exact = self.analytical_solution(X, T)
+            
+            # Compute absolute error at each point
+            abs_error = torch.abs(U_pred - U_exact)
+            
+            # Convert to numpy for visualization
+            X_np = X.cpu().numpy()
+            T_np = T.cpu().numpy()
+            error_np = abs_error.cpu().numpy()
+            
+            # Calculate error statistics
+            mean_error = error_np.mean()
+            max_error = error_np.max()
+            
+            # Print error statistics
+            print(f"Mean Error: {mean_error:.6e}")
+            print(f"Max Error: {max_error:.6e}")
+            
+            # Create figure and plot heatmap
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # Determine colormap normalization
+            if log_scale:
+                # Use logarithmic scale for the error (better for visualizing varying magnitudes)
+                # Add small epsilon to avoid log(0)
+                epsilon = 1e-10
+                norm = plt.cm.colors.LogNorm(vmin=max(epsilon, error_np.min()), vmax=max(error_np.max(), epsilon*10))
+                plot_label = 'Absolute Error (log scale)'
+            else:
+                # Linear scale
+                norm = plt.cm.colors.Normalize(vmin=0, vmax=error_np.max())
+                plot_label = 'Absolute Error'
+            
+            # Plot the heatmap
+            im = ax.pcolormesh(T_np[0, :], X_np[:, 0], error_np, cmap=cmap, norm=norm, shading='auto')
+            
+            # Add colorbar
+            cbar = fig.colorbar(im, ax=ax, label=plot_label)
+            
+            # Labels
+            ax.set_xlabel('Time (t)')
+            ax.set_ylabel('Position (x)')
+            
+            plt.tight_layout()
+            
+            return fig, ax
+            
+        except (ValueError, NotImplementedError) as e:
+            print(f"Could not compute error: {e}")
+            print("Make sure analytical_solution() is implemented for this number of solitons.")
+            return None, None
+        
+    
+
+    
     ## PLOTTING 
     def compute_profile(self, t_val):
         """
@@ -439,16 +537,53 @@ class KDV(nn.Module):
         
         return
     
-    def plot_losses(self, losses):
+    def plot_losses(self, losses, component=None):
         """
         Plot the losses over epochs to visualize training progress.
+        
+        Parameters:
+        -----------
+        losses: dict or list
+            Either a dictionary with loss components or a list of total loss values
+        component: str, list, or None
+            If None, plots total loss (default behavior)
+            If 'all', plots all loss components
+            If a string, plots that specific component ('total', 'initial', 'boundary', 'pde')
+            If a list of strings, plots all specified components
         """
-        # This can remain the same as Burgers
         plt.figure(figsize=self.figsize)
-        plt.plot(losses)
+        
+        # Handle different input types for backward compatibility
+        if isinstance(losses, list):
+            # Old format - just a list of total losses
+            plt.plot(losses, label='Total Loss')
+        else:
+            # New format - dictionary of loss components
+            if component is None:
+                # Default: plot just the total loss
+                plt.plot(losses['total'], label='Total Loss')
+            elif component == 'all':
+                # Plot all components
+                for key in losses:
+                    plt.plot(losses[key], label=f'{key.capitalize()} Loss')
+            elif isinstance(component, list):
+                # Plot specified components
+                for comp in component:
+                    if comp in losses:
+                        plt.plot(losses[comp], label=f'{comp.capitalize()} Loss')
+                    else:
+                        print(f"Warning: Unknown loss component '{comp}', skipping.")
+            elif component in losses:
+                # Plot single specified component
+                plt.plot(losses[component], label=f'{component.capitalize()} Loss')
+            else:
+                raise ValueError(f"Unknown loss component: {component}. Valid options are 'total', 'initial', 'boundary', 'pde', or 'all'")
+        
         plt.yscale('log')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
+        plt.legend()
+        plt.tight_layout()
         return
     
     def plot_spacetime(self, show_data = True):
