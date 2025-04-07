@@ -44,6 +44,9 @@ class KDV(nn.Module):
         
         # setup figure size 
         self.figsize = (10, 6)
+        
+        # Track optimizer information
+        self.adam_epochs = 0
 
     def soliton_initial(self, x, k, phi=0):
         """
@@ -300,6 +303,9 @@ Training domain setup complete:
             if verbose and (epoch % verbose_step == 0 or epoch == adam_epochs - 1):
                 print(f"Adam - Epoch {epoch}/{adam_epochs}, Total Loss: {total_loss.item():.6e}")
         
+        # Store the number of Adam epochs as an instance variable
+        self.adam_epochs = adam_epochs
+        
         # Phase 2: L-BFGS optimization
         if verbose:
             print("\nStarting L-BFGS optimization...")
@@ -442,50 +448,80 @@ Training domain setup complete:
         
         return result
 
-    def test(self, nx=1000, nt=1000):
+    def test(self, plot_heatmap=False):
         """
-        Evaluate the PINN performance by comparing against the analytical solution
-        across the entire space-time domain.
+        Compute error metrics between the predicted and analytical solutions.
+        
+        Parameters:
+        -----------
+        plot_heatmap: bool
+            Whether to plot a heatmap of the absolute error
+            
+        Returns:
+        --------
+        dict:
+            Dictionary containing error metrics
+        
+        Notes:
+        ------
+        This function requires an analytical solution to compare against.
         """
-        print(f"Evaluating PINN performance on a {nx}×{nt} grid...")
+        # Ensure test domain exists and solutions are computed
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            print("Test domain not created. Creating default testing domain...")
+            self.setup_testing_domain()
         
-        # Create evaluation grid
-        X, T, X_flat, T_flat = self.create_evaluation_grid(nx=nx, nt=nt)
+        if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
+            print("Test solutions not computed. Computing solutions...")
+            self.compute_test_solutions()
         
-        # Compute PINN predictions
-        with torch.no_grad():
-            U_pred_flat = self.net(X_flat, T_flat)
-            U_pred = U_pred_flat.reshape(X.shape)
+        # Check if analytical solution exists
+        if not hasattr(self, 'U_exact') or self.U_exact is None:
+            raise ValueError("Analytical solution not available. Error metrics cannot be computed.")
         
-        # Compute analytical solution
-        U_exact = self.analytical_solution(X, T)
+        # Compute absolute error
+        abs_error = torch.abs(self.U_pred - self.U_exact)
+        self.abs_error_np = abs_error.cpu().numpy() # Store error as numpy array for plotting
         
-        # Compute error metrics
-        l2_error = torch.sqrt(torch.mean((U_pred - U_exact)**2))
-        rel_l2_error = l2_error / torch.sqrt(torch.mean(U_exact**2))
+        # Compute mean absolute error (MAE)
+        mae = torch.mean(abs_error).item()
         
-        # Convert to NumPy for visualization
-        X_np = X.cpu().numpy()
-        T_np = T.cpu().numpy()
-        U_pred_np = U_pred.cpu().numpy()
-        U_exact_np = U_exact.cpu().numpy()
+        # Compute relative L2 error
+        l2_error = torch.sqrt(torch.mean((self.U_pred - self.U_exact)**2)).item()
+        rel_l2_error = l2_error / torch.sqrt(torch.mean(self.U_exact**2)).item()
         
-        # Report error metrics
-        print(f"L2 Error: {l2_error.item():.6e}")
-        print(f"Relative L2 Error: {rel_l2_error.item():.6e}")
+        # Compute maximum error (L-infinity norm)
+        max_error = torch.max(abs_error).item()
         
-        # Plot comparison at final time
-        final_t_idx = -1  # Last time index
-        plt.figure(figsize=self.figsize)
-        plt.plot(X_np[:, final_t_idx], U_exact_np[:, final_t_idx], 'b-', label='Exact')
-        plt.plot(X_np[:, final_t_idx], U_pred_np[:, final_t_idx], 'r--', label='PINN')
-        plt.legend()
-        plt.xlabel('x')
-        plt.ylabel('u(x,t)')
-        plt.title(f'Comparison at t = {T_np[0, final_t_idx]:.2f}')
-        plt.tight_layout()
+        # Create dictionary of error metrics
+        metrics = {
+            'mae': mae,
+            'l2_error': l2_error,
+            'rel_l2_error': rel_l2_error,
+            'max_error': max_error
+        }
         
-        return rel_l2_error.item()
+        # Print a summary of the error metrics
+        print(f"Error Metrics Summary:")
+        print(f"  Mean Absolute Error (MAE): {mae:.6e}")
+        print(f"  L2 Error: {l2_error:.6e}")
+        print(f"  Relative L2 Error: {rel_l2_error:.6e}")
+        print(f"  Maximum Error: {max_error:.6e}")
+        
+        # Plot error heatmap if requested
+        if plot_heatmap:
+            plt.figure(figsize=(10, 6))
+            # Use LogNorm for logarithmic scale colorbar
+            from matplotlib.colors import LogNorm
+            
+            contour = plt.pcolormesh(self.T_np[0, :], self.X_np[:, 0], self.abs_error_np, 
+                                cmap='hot', norm=LogNorm())
+            plt.colorbar(contour, label='Absolute Error |u_pred - u_exact| (log scale)')
+            plt.xlabel('Time (t)')
+            plt.ylabel('Position (x)')
+            plt.tight_layout()
+        
+        return 
 
     ## PLOTTING 
     def compute_profile(self, t_val):
@@ -554,12 +590,11 @@ Training domain setup complete:
         plt.xlabel('x')
         plt.ylabel('u(x,t)')
         plt.legend()
-        plt.title('Solution Profiles at Different Times')
         plt.tight_layout()
         
         return
 
-    def plot_losses(self, losses, component=None):
+    def plot_losses(self, losses, component=None, show_optimizer_switch=True):
         """
         Plot the losses over epochs to visualize training progress.
         
@@ -571,6 +606,8 @@ Training domain setup complete:
             If None, plots total loss (default behavior)
             If 'all', plots all loss components
             If a list of strings, plots all specified components
+        show_optimizer_switch: bool
+            Whether to show a vertical line indicating the switch from Adam to LBFGS optimizer
         """
         plt.figure(figsize=self.figsize)
         
@@ -588,6 +625,15 @@ Training domain setup complete:
                 plt.plot(losses[comp], label=f'{comp} loss')
             else:
                 raise ValueError(f"Unknown loss component '{comp}'")
+        
+        # Add vertical line for optimizer switch if requested
+        if show_optimizer_switch and hasattr(self, 'adam_epochs') and self.adam_epochs > 0:
+            # Add a vertical line at the Adam-to-LBFGS transition
+            plt.axvline(x=self.adam_epochs, color='r', linestyle='--', alpha=0.7)
+            
+            # Add text annotation
+            plt.text(self.adam_epochs + 5, 0.2, 'Adam → L-BFGS', 
+                     rotation=90, verticalalignment='center', transform=plt.gca().get_xaxis_transform())
         
         plt.yscale('log')
         plt.xlabel('Epoch')
