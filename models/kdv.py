@@ -36,7 +36,7 @@ class KDV(nn.Module):
         
         # define domain limits (based on Nadia's thesis)
         self.x_lims = (-50, 50)
-        self.t_lims = (0, 10)
+        self.t_lims = (0, 14)
         
         # setup training domain points
         self.setup_training_domain()
@@ -66,7 +66,7 @@ class KDV(nn.Module):
         torch.Tensor
             The soliton profile at the specified locations
         """
-        # The correct formula from Nadia's thesis: u = 2k² sech(kx + φ)²
+        # u = 2k² sech(kx + φ)²
         return 2 * (k**2) * torch.pow(1.0 / torch.cosh(k * x + phi), 2)
 
     def setup_training_domain(self, n_collocation=30000, n_initial=30000, n_boundary=30000):
@@ -97,10 +97,10 @@ class KDV(nn.Module):
         elif self.num_solitons == 2:
             # Two-soliton initial condition - parameters from Nadia's thesis
             # For linear combination of solitons
-            k1 = 0.9  # First wavenumber (c₁ = 3.23)
-            k2 = 0.5**0.5  # Second wavenumber (c₂ = 0.5)
-            phi1 = 12.5  # First phase
-            phi2 = 9.2   # Second phase
+            k1 = np.sqrt(4.0/4)  # First wavenumber (c₁ = 3.23)
+            k2 = np.sqrt(0.9/4)  # Second wavenumber (c₂ = 0.5)
+            phi1 = 16  # First phase
+            phi2 = -5   # Second phase
             
             # Linear superposition of two solitons
             u_initial = self.soliton_initial(x_initial, k1, phi1) + self.soliton_initial(x_initial, k2, phi2)
@@ -136,10 +136,10 @@ class KDV(nn.Module):
         self.u_boundary = u_boundary.to(self.device)
         
         print(f"""
-Training domain setup complete: 
-- {n_collocation} collocation points
-- {n_initial} initial points
-- {n_boundary} boundary points""")
+                Training domain setup complete: 
+                - {n_collocation} collocation points
+                - {n_initial} initial points
+                - {n_boundary} boundary points""")
         print(f"Using {self.num_solitons}-soliton initial condition.")
         
     def setup_testing_domain(self, nx=1000, nt=1000):
@@ -259,9 +259,13 @@ Training domain setup complete:
         # compute PDE residual and MSE residual loss
         residual = self.compute_pde_residual(self.x_collocation, self.t_collocation)
         pde_loss = torch.mean(residual**2) # we want MSE 
+
+        # loss weights
+        data_loss_weight = 0.1
+        pde_loss_weight = 0.9
         
         # total loss 
-        total_loss = data_loss + pde_loss
+        total_loss = data_loss_weight * data_loss + pde_loss_weight * pde_loss
         
         return total_loss, initial_loss, boundary_loss, pde_loss
     
