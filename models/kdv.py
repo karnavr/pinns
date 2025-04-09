@@ -7,6 +7,9 @@ import matplotlib.animation as animation
 
 from .base import PINN
 
+import json
+import os
+
 ## KDV EQUATION
 class KDV(nn.Module):
     def __init__(self, num_solitons=1, n_hidden_layers=3, n_neurons_per_layer=32, activation=nn.Tanh, seed=None):
@@ -160,6 +163,9 @@ class KDV(nn.Module):
         # define points in each dimension 
         x = torch.linspace(x0, x1, nx).to(self.device)
         t = torch.linspace(t0, t1, nt).to(self.device)
+
+        self.x_test = x.cpu().numpy()
+        self.t_test = t.cpu().numpy()
         
         # create meshgrid
         X, T = torch.meshgrid(x, t, indexing='ij')
@@ -347,8 +353,11 @@ class KDV(nn.Module):
         
         if verbose:
             print(f"L-BFGS complete, Final Loss: {losses['total'][-1]:.6e}")
+
+        # save losses as instance variable
+        self.losses = losses
         
-        return losses
+        return
     
     ## TESTING
     def analytical_solution(self, x, t):
@@ -435,7 +444,6 @@ class KDV(nn.Module):
         self.test_solution_computed = True
         
         # Create numpy versions for easy plotting
-        # Since many matplotlib functions work better with numpy arrays
         self.X_np = self.X_test.cpu().numpy()
         self.T_np = self.T_test.cpu().numpy()
         self.U_pred_np = self.U_pred.cpu().numpy()
@@ -785,3 +793,62 @@ class KDV(nn.Module):
             print(f"Animation saved to {save_path}")
         
         return anim
+    
+    # SAVING RESULTS
+    def save_model_result(self, filename):
+        """
+        Save model results to a JSON file.
+        
+        Parameters:
+        -----------
+        filename : str
+            Path to save the JSON file
+        """
+        
+        # Make sure testing domain exists
+        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
+            print("Test domain not created. Creating default testing domain...")
+            self.setup_testing_domain()
+        
+        # Make sure solutions are computed
+        if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
+            print("Test solutions not computed. Computing solutions...")
+            self.compute_test_solutions()
+        
+        # Prepare the results dictionary
+        results = {
+            "domain": {
+                "x": self.X_np[:, 0].tolist(),  # First column = x coordinates
+                "t": self.T_np[0, :].tolist()   # First row = t coordinates
+            },
+            "solution": {
+                "u_pred": self.U_pred_np.tolist()
+            },
+            "losses": {}
+        }
+        
+        # Add exact solution if available
+        if hasattr(self, 'U_exact_np'):
+            results["solution"]["u_exact"] = self.U_exact_np.tolist()
+        
+        # Add losses if available
+        if hasattr(self, 'losses'):
+            # Convert any NumPy or PyTorch values to regular Python types
+            losses_dict = {}
+            for key, values in self.losses.items():
+                losses_dict[key] = [float(val) for val in values]
+            results["losses"] = losses_dict
+        
+        # Check if file already exists
+        if os.path.exists(filename):
+            raise FileExistsError(f"File {filename} already exists. Please choose a different filename.")
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+        
+        # Save to file
+        with open(filename, 'w') as f:
+            json.dump(results, f)
+        
+        print(f"Results saved to {filename}")
+        return
