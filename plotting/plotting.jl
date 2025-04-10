@@ -93,6 +93,14 @@ function plot_wave_profiles(result, times; figsize=(600, 400), legendpos=:toprig
     return p
 end
 
+function plot_heatmap(result, figsize=(600, 400))
+    p = heatmap(result.x, result.t, result.u_pred, size=figsize, colorbar_title="u(x,t)", c=:viridis)
+    xlabel!(p, "x")
+    ylabel!(p, "t")
+    
+    return p
+end
+
 
 
 # SPACETIME
