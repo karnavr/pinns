@@ -38,8 +38,13 @@ class KDV(nn.Module):
         self.beta = 1.0   # coefficient for dispersive term
         
         # define domain limits (based on Nadia's thesis)
-        self.x_lims = (-50, 50)
-        self.t_lims = (0, 14)
+        if num_solitons == 1:
+            self.x_lims = (-50, 50)
+            self.t_lims = (0, 14)
+
+        if num_solitons == 3:
+            self.x_lims = (-50, 30)
+            self.t_lims = (0, 18)
         
         # setup training domain points
         self.setup_training_domain()
@@ -115,6 +120,21 @@ class KDV(nn.Module):
             
             # Linear superposition of two solitons
             u_initial = self.soliton_initial(x_initial, k1, phi1) + self.soliton_initial(x_initial, k2, phi2)
+
+        elif self.num_solitons == 3:
+
+            k1 = np.sqrt(1)  # First wavenumber (c₁ = 3.23)
+            k2 = np.sqrt(0.7)  # Second wavenumber (c₂ = 0.5)
+            k3 = np.sqrt(0.2)
+
+            phi1 = 45
+            phi2 = 25
+            phi3 = 5
+
+            self.k_vector = np.array([k1, k2, k3])
+            self.phi_vector = np.array([phi1, phi2, phi3])
+
+            u_initial = self.soliton_initial(x_initial, k1, phi1) + self.soliton_initial(x_initial, k2, phi2) + self.soliton_initial(x_initial, k3, phi3)
             
         else:
             raise ValueError(f"Support for {self.num_solitons} solitons not implemented yet")
