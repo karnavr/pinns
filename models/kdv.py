@@ -96,7 +96,12 @@ class KDV(nn.Module):
             # One-soliton initial condition - parameters from Nadia's thesis
             k = 0.9  # wavenumber
             phi = 12  # phase parameter
+
+            self.k_vector = np.array([k])
+            self.phi_vector = np.array([phi])
+
             u_initial = self.soliton_initial(x_initial, k, phi)
+
         elif self.num_solitons == 2:
             # Two-soliton initial condition - parameters from Nadia's thesis
             # For linear combination of solitons
@@ -104,9 +109,13 @@ class KDV(nn.Module):
             k2 = np.sqrt(0.9/4)  # Second wavenumber (c₂ = 0.5)
             phi1 = 16  # First phase
             phi2 = -5   # Second phase
+
+            self.k_vector = np.array([k1, k2])
+            self.phi_vector = np.array([phi1, phi2])
             
             # Linear superposition of two solitons
             u_initial = self.soliton_initial(x_initial, k1, phi1) + self.soliton_initial(x_initial, k2, phi2)
+            
         else:
             raise ValueError(f"Support for {self.num_solitons} solitons not implemented yet")
     
@@ -387,6 +396,25 @@ class KDV(nn.Module):
         else:
             raise ValueError(f"Analytical solution for {self.num_solitons} solitons not implemented")
 
+
+    def single_soliton(self, x, t, k, phi):
+        """
+        Compute the analytical solution for a single soliton.
+        """
+        # Use the k and phi parameters directly, don't override them
+        argument = (k*x) - (4*(k**3) * t) + phi
+        return 2 * (k**2) * torch.pow(1.0 / torch.cosh(argument), 2)
+        
+    def compute_linear_combination(self, x, t, k_vector, phi_vector):
+        """
+        Compute the analytical solution for a linear combination of solitons.
+        """
+        solution = torch.zeros_like(x)
+        for k, phi in zip(k_vector, phi_vector):
+            solution += self.single_soliton(x, t, k, phi)
+
+        return solution.cpu().numpy()
+
     def compute_test_solutions(self, force_recompute=False):
         """
         Compute the PINN prediction and analytical solution (if available) over the entire test domain.
@@ -457,6 +485,8 @@ class KDV(nn.Module):
         result = {'predicted': self.U_pred}
         if has_exact:
             result['exact'] = self.U_exact
+
+        self.U_lin_comb_np = self.compute_linear_combination(self.X_test, self.T_test, self.k_vector, self.phi_vector)
         
         return result
 
@@ -804,11 +834,7 @@ class KDV(nn.Module):
         filename : str
             Path to save the JSON file
         """
-        
-        # Make sure testing domain exists
-        if not hasattr(self, 'test_domain_created') or not self.test_domain_created:
-            print("Test domain not created. Creating default testing domain...")
-            self.setup_testing_domain()
+
         
         # Make sure solutions are computed
         if not hasattr(self, 'test_solution_computed') or not self.test_solution_computed:
@@ -822,7 +848,8 @@ class KDV(nn.Module):
                 "t": self.T_np[0, :].tolist()   # First row = t coordinates
             },
             "solution": {
-                "u_pred": self.U_pred_np.tolist()
+                "u_pred": self.U_pred_np.tolist(),
+                "u_lin_comb": self.U_lin_comb_np.tolist()
             },
             "losses": {}
         }

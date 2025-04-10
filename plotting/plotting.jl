@@ -57,12 +57,12 @@ Parameters:
 
 Returns a plot with stacked subplots showing the wave profile at each time.
 """
-function plot_wave_profiles(result, times; figsize=(600, 400))
+function plot_wave_profiles(result, times; figsize=(600, 400), legendpos=:topright, plot_linear_combination=false)
     # Determine plot layout - one subplot per time
     n_plots = length(times)
     
     # Create the figure with appropriate size
-    p = plot(layout=(n_plots, 1), size=figsize, legend=:topright)
+    p = plot(layout=(n_plots, 1), size=figsize, legend=legendpos)
     
     for (i, target_time) in enumerate(times)
         # Find the closest time index
@@ -72,6 +72,11 @@ function plot_wave_profiles(result, times; figsize=(600, 400))
         # Plot predicted solution
         plot!(p[i], result.x, result.u_pred[:, time_idx], 
               linewidth=2, label="t = $(round(actual_time, digits=1))")
+
+        if plot_linear_combination
+            plot!(p[i], result.x, result.u_lin_comb[:, time_idx], 
+                  linewidth=1, color=:black, linestyle=:dash, label=false)
+        end
         
         # Add labels only to the bottom subplot
         if i == n_plots
@@ -82,11 +87,12 @@ function plot_wave_profiles(result, times; figsize=(600, 400))
             plot!(p[i], xformatter=xformatter)
         end
         
-        ylabel!(p[i], "u(x,t)")
+        ylabel!(p[i], "u(x)")
     end
     
     return p
 end
+
 
 
 # SPACETIME

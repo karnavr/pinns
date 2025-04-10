@@ -18,6 +18,7 @@ struct KdVResult
     t::Vector{Float64}
     u_pred::Matrix{Float64}
     u_exact::Union{Matrix{Float64}, Nothing}
+    u_lin_comb::Union{Matrix{Float64}, Nothing}
     losses::Dict{String, Vector{Float64}}
 end
 
@@ -41,7 +42,7 @@ function load_kdv_result(filename)
     # each column is a time point (standard in Julia)
     u_pred_list = data["solution"]["u_pred"]
     u_pred = Matrix{Float64}(undef, length(x), length(t))
-    
+
     for i in 1:length(x)
         for j in 1:length(t)
             u_pred[i,j] = u_pred_list[i][j]
@@ -60,6 +61,18 @@ function load_kdv_result(filename)
             end
         end
     end
+
+    u_lin_comb = nothing
+    if haskey(data["solution"], "u_lin_comb")
+        u_lin_comb_list = data["solution"]["u_lin_comb"]
+        u_lin_comb = Matrix{Float64}(undef, length(x), length(t))
+        
+        for i in 1:length(x)
+            for j in 1:length(t)
+                u_lin_comb[i,j] = u_lin_comb_list[i][j]
+            end
+        end
+    end
     
     # Extract losses
     losses = Dict{String, Vector{Float64}}()
@@ -70,7 +83,7 @@ function load_kdv_result(filename)
     end
     
     # Create and return the result struct
-    return KdVResult(x, t, u_pred, u_exact, losses)
+    return KdVResult(x, t, u_pred, u_exact, u_lin_comb, losses)
 end
 
 # Example: How to use
